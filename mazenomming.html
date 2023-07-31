@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset='utf-8'>
+    <meta http-equiv='X-UA-Compatible' content='IE=edge'>
+    <title>Snapper</title>
+    <meta name='viewport' content='width=device-width, initial-scale=1'>
+    <style>
+        canvas { border: 0px solid black; position: absolute; }
+      </style>
+</head>
+<body>
+    <canvas id="wallsCanvas"></canvas>
+    <canvas id="blobsCanvas"></canvas>
+    <canvas id="canvas"></canvas>
+    <script>
+
+const frame = async (ms) => new Promise(r => window.requestAnimationFrame(r))
+
+const maxSize = 600;
+
+const wallsCanvas = document.getElementById("wallsCanvas");
+wallsCanvas.width = maxSize;
+wallsCanvas.height = maxSize;
+const wallsCtx = wallsCanvas.getContext("2d", { willReadFrequently: true });
+
+const blobsCanvas = document.getElementById("blobsCanvas");
+blobsCanvas.width = maxSize;
+blobsCanvas.height = maxSize;
+const blobsCtx = blobsCanvas.getContext("2d");
+
+const canvas = document.getElementById("canvas");
+canvas.width = maxSize;
+canvas.height = maxSize;
+const ctx = canvas.getContext("2d");
+
+
+const mazeWidth = 29;
+const mazeHeight = 29;
+const holes = 30;
+const cellSize = 20;
+
+let x = 35;
+let y = 30;
+
+const v = 2;
+let vx = 0;
+let vy = 0;
+let direction = 0;
+let t = 0;
+
+const radius = 12;
+
+class Sounds {
+    audio = new (window.AudioContext || window.webkitAudioContext)();
+
+    playDing() {
+        this._playSound(880, 0.5);
+    }
+    playBong() {
+        this._playSound(440, 4);
+    }
+    _playSound(frequency, duration) {
+        const o = this.audio.createOscillator();
+        const g = this.audio.createGain();
+        o.connect(g);
+        o.type = 'sine';
+        o.frequency.value = frequency; // Frequency in Hz
+        g.connect(this.audio.destination);
+        g.gain.value = 0.6; 
+        o.start(0);
+        g.gain.exponentialRampToValueAtTime(0.00001, this.audio.currentTime + duration);
+    }
+}
+
+class Status {
+    constructor(ctx) {
+        this.ctx = ctx;
+    }
+    drawStatusMessage(text, position) {
+        this.ctx.fillStyle = "white";   
+        this.ctx.font = "16px sans-serif";
+        const textWidth = ctx.measureText(text).width;
+        this.ctx.fillText(text, position - textWidth, 16);
+    }
+}
+
+class Maze {
+    directions = [
+        { dx: -1, dy: 0 },  // Left
+        { dx: 1, dy: 0 },   // Right
+        { dx: 0, dy: -1 },  // Up
+        { dx: 0, dy: 1 }    // Down
+    ];
+    color = "blue";
+
+    constructor(ctx, mazeWidth, mazeHeight, cellSize) {
+        this.ctx = ctx;
+        this.mazeWidth = mazeWidth;
+        this.mazeHeight = mazeHeight;
+        this.cellSize = cellSize;
+        this.maze = Array(this.mazeHeight).fill().map(() => Array(this.mazeWidth).fill(0));
+        this.carve(1, 1);
+    }
+
+    getMaze() { return this.maze; }
+
+    carve(x, y) {
+        this.directions.sort(() => Math.random() - 0.5);
+        for (let { dx, dy } of this.directions) {
+            const nx = x + dx * 2;
+            const ny = y + dy * 2;
+            if (nx >= 0 && nx < this.mazeWidth && ny >= 0 && ny < this.mazeHeight 
+                && (this.maze[ny][nx] === 0 || Math.random() < 0.12)) {
+                this.maze[y + dy][x + dx] = 1;
+                this.maze[ny][nx] = 1;
+                this.carve(nx, ny);
+            }
+        }
+    }
+
+    draw() {
+        this.ctx.fillStyle = this.color;
+        this.ctx.shadowOffsetX = 4;
+        this.ctx.shadowOffsetY = 4;
+        this.ctx.shadowBlur = 2;
+        this.ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
+
+        for (let y = 0; y < this.mazeHeight; y++) {
+            for (let x = 0; x < this.mazeWidth; x++) {
+                if (this.maze[y][x] === 0) {
+                    this.ctx.fillRect(x * this.cellSize, y * this.cellSize, this.cellSize, this.cellSize);
+                }
+            }
+        }
+    }
+
+    isWall(pacX, pacY) {
+        const w = this.ctx.getImageData(1, 1, 1, 1).data;
+        const p = this.ctx.getImageData(pacX, pacY, 1, 1).data;
+        
+        return p[0] === w[0] && p[1] === w[1] && p[2] === w[2];
+    }
+}
+
+
+class Blobs {
+    _blobs = [];
+    blobRadius = 4;
+    
+    constructor(ctx, sounds, status, maze) {
+        this.ctx = ctx;
+        this.sounds = sounds;
+        this.status = status;
+        const halfCell = cellSize / 2 + 1;
+        for (let y = 0; y < maze.length; y++) {
+            for (let x = 0; x < maze[y].length; x++) {
+                if (maze[y][x]==1) {
+                    this._addBlob(x * cellSize + halfCell, y * cellSize + halfCell)
+                }
+            }
+        }
+        this.initialBlobCount = this._blobs.length;
+    }
+
+    _addBlob(x, y) {
+        this._blobs.push({x, y});
+    }
+
+    _removeBlob(x, y) {
+        this._blobs = this._blobs.filter(blob => !(blob.x === x && blob.y === y));
+    }
+
+    removeIfEaten(pacX, pacY) {
+        const r = radius / 2;
+        const isOverlap = (x, y) => (pacX+r > x && pacX-r < x) && (pacY+r > y && pacY-r < y);
+        this._blobs.filter(b =>isOverlap(b.x, b.y)).forEach(b => {
+            this._removeBlob(b.x, b.y)
+            this.ctx.clearRect(b.x-this.blobRadius, b.y-this.blobRadius, this.blobRadius*2, this.blobRadius*2);
+            this.sounds.playDing();
+        });
+    }
+
+    drawBlobs() {
+        for (let b of this._blobs) {
+            this.drawBlob(b.x, b.y)
+        }
+    }
+
+    drawBlob(x, y) {
+        const radius = this.blobRadius;      
+
+        const gradient = this.ctx.createRadialGradient(x - radius / 2, y - radius / 2, 0, x, y, radius);
+        const hue = 220; // 220 = blue
+        gradient.addColorStop(0, `hsl(${hue},80%,90%)`);        
+        gradient.addColorStop(0.8, `hsl(${hue},80%,60%)`);      
+        gradient.addColorStop(1, `hsl(${hue},100%,40%)`);       
+
+        this.ctx.beginPath();
+        this.ctx.arc(x, y, radius, 0, Math.PI * 2, false);
+        this.ctx.lineTo(x,y); 
+        this.ctx.closePath();
+
+        this.ctx.fillStyle = gradient;
+        this.ctx.fill();
+    }
+
+    reportBlobCount() {
+        const text = this._blobs.length;
+        this.status.drawStatusMessage(text, 50);
+    }
+
+    allEaten() {
+        return this._blobs.length === 0;// this._blobs.length < (this.initialBlobCount-10);
+    }
+}
+
+
+class Pacman {
+    constructor(ctx) {
+        this.ctx = ctx;
+    }
+
+    drawPacman(x, y, t, direction = 0) {  
+        const mouth = ((t % 20)/100)+0.05;
+
+        const gradient = this.ctx.createRadialGradient(x - radius / 2, y - radius / 2, 0, x, y, radius);
+        const hue = 60; // 60 = yellow
+        gradient.addColorStop(0, `hsl(${hue},80%,90%)`);        
+        gradient.addColorStop(0.8, `hsl(${hue},80%,60%)`);      
+        gradient.addColorStop(1, `hsl(${hue},100%,40%)`);       
+
+        this.ctx.shadowOffsetX = 2;
+        this.ctx.shadowOffsetY = 2;
+        this.ctx.shadowBlur = 2;
+        this.ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
+        
+        const rotation = (direction/2)*Math.PI;
+        
+        this.ctx.beginPath();
+        this.ctx.arc(x, y, radius, rotation + Math.PI*mouth, rotation + Math.PI * (2-mouth), false);
+        this.ctx.lineTo(x,y); 
+        this.ctx.closePath();
+
+        this.ctx.fillStyle = gradient;
+        this.ctx.fill();
+    }
+
+    updatePacmanPosition(walls) {
+        if (walls.isWall(x + vx*4, y + vy*4)) {
+            return;
+        } 
+
+        x += vx;
+        y += vy;
+    }
+}
+
+class Timer {
+    isRunning = false;
+    finalTime = 0;
+    constructor(ctx, sounds, status) {
+        this.ctx = ctx;
+        this.sounds = sounds;
+        this.status = status;
+    }
+    start() {
+        this.startTime = Date.now();
+        this.isRunning = true;
+    }
+    stop() {
+        if (this.isRunning) {
+            this.finalTime = this.getTime();
+            this.sounds.playBong();
+        }
+        this.isRunning = false;
+    }
+    getTime() {
+        if (this.startTime === null) {
+            return 0;
+        }
+        const elapsedMilliseconds = Date.now() - this.startTime;
+        return Math.floor(elapsedMilliseconds / 1000);
+    }
+    drawTimer() {
+        const text = this.isRunning ? this.getTime()+" s" : this.finalTime+" s";
+        this.status.drawStatusMessage(text, 560);
+    }
+}
+
+
+async function draw() {
+    const status = new Status(ctx);
+    const sounds = new Sounds();
+
+    const maze = new Maze(wallsCtx, mazeWidth, mazeHeight, cellSize);
+    maze.draw();
+
+    const blobs = new Blobs(blobsCtx, sounds, status, maze.getMaze());
+    blobs.drawBlobs();
+
+    const timer = new Timer(ctx, sounds, status);
+    timer.start(); 
+
+    const pacman = new Pacman(ctx);
+    
+    while (true) {
+        t += 1;
+        ctx.clearRect(0,0,canvas.width,canvas.height);
+        timer.drawTimer();
+        blobs.removeIfEaten(x, y);
+        blobs.reportBlobCount();
+        if (blobs.allEaten()) {
+            timer.stop();
+        }
+        pacman.updatePacmanPosition(maze);     
+        pacman.drawPacman(x, y, t, direction);   
+        await frame();
+    }
+}
+
+
+window.addEventListener("keydown", (e) => {
+    const keyHandlers = {
+        ArrowUp: () => { vx = 0; vy = -v; direction = 3; },
+        ArrowDown: () => { vx = 0; vy = v; direction = 1; },
+        ArrowLeft: () => { vx = -v; vy = 0; direction = 2; },
+        ArrowRight: () => { vx = v; vy = 0; direction = 0; },
+    };
+    keyHandlers[e.key]?.();
+});
+
+
+draw();
+
+    </script>
+</body>
+</html>
